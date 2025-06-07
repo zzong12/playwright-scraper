@@ -26,6 +26,38 @@
 curl "http://localhost:8000/scrape?url=https://example.com"
 ```
 
+### GET /preload/list
+获取所有预加载URL的状态
+
+**响应:**
+- JSON格式返回预加载URL列表，包含以下字段：
+  - `url`: 预加载URL
+  - `last_updated`: 最后更新时间戳
+  - `content_length`: 缓存内容长度
+
+**使用示例:**
+```bash
+curl "http://localhost:8000/preload/list"
+```
+
+### POST /preload/update
+更新预加载URL配置
+
+**参数:**
+- `urls` (必填): 需要预加载的URL列表（JSON数组格式）
+
+**响应:**
+- JSON格式返回操作结果，包含：
+  - `status`: 操作状态
+  - `count`: 当前预加载URL总数
+  - `added`: 新增URL数量
+  - `removed`: 移除URL数量
+
+**使用示例:**
+```bash
+curl -X POST -H "Content-Type: application/json" -d '["https://example.com"]' "http://localhost:8000/preload/update"
+```
+
 ## 安装部署
 
 1. 构建Docker镜像:
