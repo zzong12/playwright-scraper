@@ -12,67 +12,12 @@ import logging
 # Cache with 1 hour TTL and max 1000 entries
 cache = TTLCache(maxsize=1000, ttl=3600)
 
-# Preload configuration and cache
+# Preload configuration and cache with size limit
 preload_urls: Dict[str, dict] = {}  # {url: {"last_updated": timestamp, "interval": 600}}
-preload_cache: Dict[str, str] = {}  # {url: content}
+preload_cache: Dict[str, str] = {}  # {url: content} - will be limited to 500 entries
 
 # Concurrency control (max 50 concurrent requests)
 semaphore = asyncio.Semaphore(50)
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Launch browser at startup
-    try:
-        playwright = await async_playwright().start()
-        browser = await playwright.chromium.launch(
-            headless=True,
-            args=[
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage'
-            ]
-        )
-        app.state.browser = browser  # Store browser on app state
-        app.state.playwright = playwright
-        
-        yield {
-            "playwright": playwright,
-            "browser": browser
-        }
-    finally:
-        # Cleanup resources
-        if hasattr(app.state, 'browser'):
-            await app.state.browser.close()
-        if hasattr(app.state, 'playwright'):
-            await app.state.playwright.stop()
-
-async def preload_task(app: FastAPI):
-    """Background task to preload URLs"""
-    while True:
-        try:
-            logger.info("Starting preload cycle for %d URLs", len(preload_urls))
-            success_count = 0
-            for url in list(preload_urls.keys()):
-                try:
-                    browser = app.state.browser
-                    page = await browser.new_page()
-                    await page.goto(url, timeout=60000)
-                    content = await page.content()
-                    await page.close()
-                    
-                    preload_cache[url] = content
-                    preload_urls[url]["last_updated"] = time.time()
-                    success_count += 1
-                    logger.info("Successfully preloaded %s (%d bytes)", url, len(content))
-                except Exception as e:
-                    logger.error(f"Preload failed for {url}: {str(e)}")
-            
-            logger.info("Preload cycle completed: %d/%d URLs succeeded",
-                      success_count, len(preload_urls))
-        except Exception as e:
-            logger.error(f"Preload task error: {str(e)}")
-        
-        await asyncio.sleep(600)  # Sleep for 10 minutes
 
 # Configure logging to console
 logging.basicConfig(
@@ -81,6 +26,19 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
+
+def limit_preload_cache():
+    """Limit preload cache to 500 entries, removing oldest entries if needed"""
+    if len(preload_cache) > 500:
+        # Remove oldest entries based on last_updated time
+        sorted_urls = sorted(
+            preload_cache.keys(),
+            key=lambda url: preload_urls.get(url, {}).get("last_updated", 0)
+        )
+        # Remove oldest 100 entries
+        for url in sorted_urls[:100]:
+            preload_cache.pop(url, None)
+            logger.info(f"Removed old preload cache entry: {url}")
 
 @asynccontextmanager
 async def app_lifespan(app: FastAPI):
@@ -120,6 +78,44 @@ async def app_lifespan(app: FastAPI):
                 await app.state.playwright.stop()
         except Exception as e:
             logger.error(f"Error stopping playwright: {str(e)}")
+
+async def preload_task(app: FastAPI):
+    """Background task to preload URLs"""
+    while True:
+        try:
+            logger.info("Starting preload cycle for %d URLs", len(preload_urls))
+            success_count = 0
+            for url in list(preload_urls.keys()):
+                page = None
+                try:
+                    browser = app.state.browser
+                    page = await browser.new_page()
+                    await page.goto(url, timeout=60000)
+                    content = await page.content()
+                    
+                    preload_cache[url] = content
+                    preload_urls[url]["last_updated"] = time.time()
+                    success_count += 1
+                    logger.info("Successfully preloaded %s (%d bytes)", url, len(content))
+                except Exception as e:
+                    logger.error(f"Preload failed for {url}: {str(e)}")
+                finally:
+                    # Always close the page to prevent memory leaks
+                    if page:
+                        try:
+                            await page.close()
+                        except Exception as e:
+                            logger.error(f"Error closing page for {url}: {str(e)}")
+            
+            # Limit cache size
+            limit_preload_cache()
+            
+            logger.info("Preload cycle completed: %d/%d URLs succeeded",
+                      success_count, len(preload_urls))
+        except Exception as e:
+            logger.error(f"Preload task error: {str(e)}")
+        
+        await asyncio.sleep(600)  # Sleep for 10 minutes
 
 app = FastAPI(lifespan=app_lifespan)
 
@@ -175,7 +171,6 @@ async def scrape_url(
     request: Request,
     url: str = Query(..., description="URL to scrape")
 ):
-    # Check cache first
     # Validate URL format
     if not url.startswith(('http://', 'https://')):
         raise HTTPException(status_code=400, detail="Invalid URL format")
@@ -189,26 +184,28 @@ async def scrape_url(
     if not force and url in cache:
         return cache[url]
 
-    browser = request.app.state.browser
-
     async with semaphore:  # Concurrency control
+        page = None
         try:
             browser = request.app.state.browser
             page = await browser.new_page()
             
-            try:
-                # Navigate with timeout
-                await page.goto(url, timeout=60000)
-                content = await page.content()
+            # Navigate with timeout
+            await page.goto(url, timeout=60000)
+            content = await page.content()
 
-                # Store in cache
-                cache[url] = content
-                return content
-            except Exception as e:
-                await page.close()
-                raise HTTPException(status_code=500, detail=f"Page navigation failed: {str(e)}")
+            # Store in cache
+            cache[url] = content
+            return content
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Browser operation failed: {str(e)}")
+        finally:
+            # Always close the page to prevent memory leaks
+            if page:
+                try:
+                    await page.close()
+                except Exception as e:
+                    logger.error(f"Error closing page for {url}: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
