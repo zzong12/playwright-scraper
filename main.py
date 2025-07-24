@@ -92,7 +92,10 @@ async def preload_task(app: FastAPI):
                     page = await browser.new_page()
                     await page.goto(url, timeout=60000)
                     content = await page.content()
-                    
+                    # Check content length
+                    if len(content) == 0:
+                        logger.warning(f"Preload failed for {url}: Empty content")
+                        continue
                     preload_cache[url] = content
                     preload_urls[url]["last_updated"] = time.time()
                     success_count += 1
@@ -196,6 +199,9 @@ async def scrape_url(
 
             # Store in cache
             cache[url] = content
+            preload_cache[url] = content
+            # Limit preload cache size
+            limit_preload_cache()
             return content
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Browser operation failed: {str(e)}")
