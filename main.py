@@ -33,7 +33,7 @@ async def app_lifespan(app: FastAPI):
     # Launch browser at startup
     try:
         playwright = await async_playwright().start()
-        browser = await playwright.chromium.launch(
+        browser = await playwright.firefox.launch(
             headless=True,
             args=[
                 '--no-sandbox',
@@ -82,7 +82,21 @@ async def preload_task(app: FastAPI):
                     # Disable cache to ensure fresh content
                     await page.route("**/*", lambda route: route.continue_(headers={**route.request.headers, "Cache-Control": "no-cache, no-store, must-revalidate"}))
                     
-                    await page.goto(url, timeout=30000, wait_until="domcontentloaded")
+                    # Universal smart loading strategy for all websites
+                    try:
+                        await page.goto(url, timeout=45000)
+                        # Smart wait: check if content is still changing
+                        initial_length = len(await page.content())
+                        await page.wait_for_timeout(500)
+                        final_length = len(await page.content())
+                        # Only wait more if content is still changing
+                        if final_length != initial_length:
+                            await page.wait_for_timeout(1000)
+                    except Exception:
+                        # Fallback to load if networkidle times out
+                        logger.warning(f"Networkidle timeout for {url}, falling back to load event")
+                        await page.goto(url, timeout=30000)
+                        await page.wait_for_timeout(1000)
                     content = await page.content()
                     # Check content length
                     if len(content) == 0:
@@ -111,7 +125,7 @@ async def preload_task(app: FastAPI):
         except Exception as e:
             logger.error(f"Preload task error: {str(e)}")
         
-        await asyncio.sleep(600)  # Sleep for 10 minutes (balanced approach)
+        await asyncio.sleep(30)  # Sleep for 10 minutes (balanced approach)
 
 app = FastAPI(lifespan=app_lifespan)
 
@@ -188,10 +202,23 @@ async def scrape_url(
             page = await browser.new_page()
             
             # Disable cache to ensure fresh content
-            await page.route("**/*", lambda route: route.continue_(headers={**route.request.headers, "Cache-Control": "no-cache, no-store, must-revalidate"}))
+            await page.route("**/*", lambda route: route.continue_(headers={**route.request.headers, "Cache-Control": "no-cache, no-store, must-revalidate", "keep-alive": "false"}))
             
-            # Navigate with timeout and wait for DOM content loaded
-            await page.goto(url, timeout=30000, wait_until="domcontentloaded")
+            # Universal smart loading strategy for all websites
+            try:
+                await page.goto(url, timeout=45000)
+                # Smart wait: check if content is still changing
+                initial_length = len(await page.content())
+                await page.wait_for_timeout(500)
+                final_length = len(await page.content())
+                # Only wait more if content is still changing
+                if final_length != initial_length:
+                    await page.wait_for_timeout(1000)
+            except Exception:
+                # Fallback to load if networkidle times out
+                logger.warning(f"Networkidle timeout for {url}, falling back to load event")
+                await page.goto(url, timeout=30000)
+                await page.wait_for_timeout(1000)
             content = await page.content()
 
             # Store in unified cache
