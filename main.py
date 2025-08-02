@@ -9,12 +9,11 @@ from typing import Optional, Dict, List
 import time
 import logging
 
-# Cache with 1 hour TTL and max 1000 entries
+# Unified cache with 1 hour TTL and max 1000 entries
 cache = TTLCache(maxsize=1000, ttl=3600)
 
-# Preload configuration and cache with size limit
+# Preload configuration 
 preload_urls: Dict[str, dict] = {}  # {url: {"last_updated": timestamp, "interval": 600}}
-preload_cache: Dict[str, str] = {}  # {url: content} - will be limited to 500 entries
 
 # Concurrency control (max 50 concurrent requests)
 semaphore = asyncio.Semaphore(50)
@@ -27,18 +26,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-def limit_preload_cache():
-    """Limit preload cache to 500 entries, removing oldest entries if needed"""
-    if len(preload_cache) > 500:
-        # Remove oldest entries based on last_updated time
-        sorted_urls = sorted(
-            preload_cache.keys(),
-            key=lambda url: preload_urls.get(url, {}).get("last_updated", 0)
-        )
-        # Remove oldest 100 entries
-        for url in sorted_urls[:100]:
-            preload_cache.pop(url, None)
-            logger.info(f"Removed old preload cache entry: {url}")
+# TTLCache automatically manages expiration and size limits
 
 @asynccontextmanager
 async def app_lifespan(app: FastAPI):
@@ -90,13 +78,19 @@ async def preload_task(app: FastAPI):
                 try:
                     browser = app.state.browser
                     page = await browser.new_page()
-                    await page.goto(url, timeout=60000)
+                    
+                    # Disable cache to ensure fresh content
+                    await page.route("**/*", lambda route: route.continue_(headers={**route.request.headers, "Cache-Control": "no-cache, no-store, must-revalidate"}))
+                    
+                    await page.goto(url, timeout=30000, wait_until="domcontentloaded")
                     content = await page.content()
                     # Check content length
                     if len(content) == 0:
                         logger.warning(f"Preload failed for {url}: Empty content")
                         continue
-                    preload_cache[url] = content
+                    
+                    # Store in unified cache
+                    cache[url] = content
                     preload_urls[url]["last_updated"] = time.time()
                     success_count += 1
                     logger.info("Successfully preloaded %s (%d bytes)", url, len(content))
@@ -110,15 +104,14 @@ async def preload_task(app: FastAPI):
                         except Exception as e:
                             logger.error(f"Error closing page for {url}: {str(e)}")
             
-            # Limit cache size
-            limit_preload_cache()
+            # TTLCache automatically manages size limits
             
             logger.info("Preload cycle completed: %d/%d URLs succeeded",
                       success_count, len(preload_urls))
         except Exception as e:
             logger.error(f"Preload task error: {str(e)}")
         
-        await asyncio.sleep(600)  # Sleep for 10 minutes
+        await asyncio.sleep(600)  # Sleep for 10 minutes (balanced approach)
 
 app = FastAPI(lifespan=app_lifespan)
 
@@ -126,11 +119,14 @@ app = FastAPI(lifespan=app_lifespan)
 async def list_preload_urls():
     """List all preload URLs and their status"""
     result = []
+    current_time = time.time()
     for url, info in preload_urls.items():
+        content = cache.get(url, "")
         result.append({
             "url": url,
             "last_updated": info["last_updated"],
-            "content_length": len(preload_cache.get(url, "")) if url in preload_cache else 0
+            "content_length": len(content),
+            "cache_valid": url in cache  # TTLCache handles expiration automatically
         })
     return result
 
@@ -157,7 +153,7 @@ async def update_preload_urls(urls: List[str]):
     for url in list(preload_urls.keys()):
         if url not in urls:
             preload_urls.pop(url, None)
-            preload_cache.pop(url, None)
+            cache.pop(url, None)  # Remove from unified cache
             removed += 1
             logger.info(f"Removed preload URL: {url}")
     
@@ -180,11 +176,9 @@ async def scrape_url(
 
     force = request.query_params.get("force", "false").lower() == "true"
     
-    # Check preload cache first if not forcing
-    if not force and url in preload_cache:
-        return preload_cache[url]
-        
+    # Check unified cache if not forcing
     if not force and url in cache:
+        logger.info(f"Returning from cache: {url}")
         return cache[url]
 
     async with semaphore:  # Concurrency control
@@ -193,15 +187,17 @@ async def scrape_url(
             browser = request.app.state.browser
             page = await browser.new_page()
             
-            # Navigate with timeout
-            await page.goto(url, timeout=60000)
+            # Disable cache to ensure fresh content
+            await page.route("**/*", lambda route: route.continue_(headers={**route.request.headers, "Cache-Control": "no-cache, no-store, must-revalidate"}))
+            
+            # Navigate with timeout and wait for DOM content loaded
+            await page.goto(url, timeout=30000, wait_until="domcontentloaded")
             content = await page.content()
 
-            # Store in cache
+            # Store in unified cache
             cache[url] = content
-            preload_cache[url] = content
-            # Limit preload cache size
-            limit_preload_cache()
+            
+            logger.info(f"Fresh content fetched for: {url} (%d bytes)", len(content))
             return content
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Browser operation failed: {str(e)}")
