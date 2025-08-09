@@ -1,0 +1,11 @@
+version: '3.8'
+services:
+  playwright-scraper:
+    build: .
+    # image: registry.cn-hangzhou.aliyuncs.com/openz/playwright-scraper:v0.0.6
+    container_name: playwright-scraper
+    ports:
+      - 8000:8000
+    env_file:
+      - .env
+    restart: unless-stopped

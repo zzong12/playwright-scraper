@@ -9,6 +9,7 @@ from typing import Optional, Dict, List
 import time
 import logging
 from datetime import datetime
+import os
 
 # Unified cache with 1 hour TTL and max 1000 entries
 cache = TTLCache(maxsize=1000, ttl=3600)
@@ -18,6 +19,9 @@ preload_urls: Dict[str, dict] = {}  # {url: {"last_updated": timestamp, "interva
 
 # Concurrency control (max 50 concurrent requests)
 semaphore = asyncio.Semaphore(50)
+
+task_interval = int(os.getenv("TASK_INTERVAL", 600))
+server_port = int(os.getenv("SERVER_PORT", 8000))
 
 # Configure logging to console
 logging.basicConfig(
@@ -132,7 +136,7 @@ async def preload_task(app: FastAPI):
         except Exception as e:
             logger.error(f"Preload task error: {str(e)}")
         
-        await asyncio.sleep(30)  # Sleep for 10 minutes (balanced approach)
+        await asyncio.sleep(task_interval)  # Sleep for 'task_interval' seconds (configurable, default 600s)
 
 app = FastAPI(lifespan=app_lifespan)
 
@@ -246,4 +250,4 @@ async def scrape_url(
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=server_port)
