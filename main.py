@@ -8,6 +8,7 @@ import asyncio
 from typing import Optional, Dict, List
 import time
 import logging
+from datetime import datetime
 
 # Unified cache with 1 hour TTL and max 1000 entries
 cache = TTLCache(maxsize=1000, ttl=3600)
@@ -69,6 +70,7 @@ async def app_lifespan(app: FastAPI):
 
 async def preload_task(app: FastAPI):
     """Background task to preload URLs"""
+    global preload_urls
     while True:
         try:
             logger.info("Starting preload cycle for %d URLs", len(preload_urls))
@@ -104,8 +106,13 @@ async def preload_task(app: FastAPI):
                         continue
                     
                     # Store in unified cache
-                    cache[url] = content
-                    preload_urls[url]["last_updated"] = time.time()
+                    now = datetime.now()
+                    time_str = now.strftime("%Y-%m-%d %H:%M:%S")
+                    preload_urls[url]["last_updated"] = time_str
+                    # cache mark
+                    html_cache_mark = '<!-- cache at ' + time_str + ' -->'
+                    new_content = content + html_cache_mark
+                    cache[url] = new_content
                     success_count += 1
                     logger.info("Successfully preloaded %s (%d bytes)", url, len(content))
                 except Exception as e:
@@ -132,6 +139,7 @@ app = FastAPI(lifespan=app_lifespan)
 @app.get("/preload/list", response_class=JSONResponse)
 async def list_preload_urls():
     """List all preload URLs and their status"""
+    global preload_urls
     result = []
     current_time = time.time()
     for url, info in preload_urls.items():
@@ -147,6 +155,7 @@ async def list_preload_urls():
 @app.post("/preload/update")
 async def update_preload_urls(urls: List[str]):
     """Update preload URLs configuration"""
+    global preload_urls
     logger.info("Updating preload URLs configuration")
     added = 0
     removed = 0
@@ -157,8 +166,7 @@ async def update_preload_urls(urls: List[str]):
             continue
         if url not in preload_urls:
             preload_urls[url] = {
-                "last_updated": 0,
-                "interval": 600
+                "last_updated": "-"
             }
             added += 1
             logger.info(f"Added new preload URL: {url}")
@@ -189,7 +197,7 @@ async def scrape_url(
         raise HTTPException(status_code=400, detail="Invalid URL format")
 
     force = request.query_params.get("force", "false").lower() == "true"
-    
+    global preload_urls, cache
     # Check unified cache if not forcing
     if not force and url in cache:
         logger.info(f"Returning from cache: {url}")
